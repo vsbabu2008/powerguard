@@ -1,5 +1,5 @@
 import streamlit as st
-import sqlite3
+import mysql.connector
 import pandas as pd
 import random
 import datetime
@@ -7,135 +7,92 @@ import time
 import plotly.express as px
 import plotly.io as pio
 
-pio.templates.default = "plotly_dark"
-
 # --------------------------------------------------
 # CONFIG
 # --------------------------------------------------
 st.set_page_config(page_title="Smart Electricity Theft Detection", layout="wide")
-DB = "electricity_theft.db"
+pio.templates.default = "plotly_dark"
 THRESHOLD = 250
 
 # --------------------------------------------------
-# DATABASE
+# DATABASE CONNECTION (MySQL)
 # --------------------------------------------------
-conn = sqlite3.connect(DB, check_same_thread=False)
+conn = mysql.connector.connect(
+    host=st.secrets["mysql"]["host"],
+    port=st.secrets["mysql"]["port"],
+    user=st.secrets["mysql"]["user"],
+    password=st.secrets["mysql"]["password"],
+    database=st.secrets["mysql"]["database"]
+)
 cur = conn.cursor()
 
-cur.execute("""
-CREATE TABLE IF NOT EXISTS CONSUMER(
-    consumer_id INTEGER PRIMARY KEY,
-    name TEXT,
-    area TEXT
-)
-""")
-
-cur.execute("""
-CREATE TABLE IF NOT EXISTS METER(
-    meter_id INTEGER PRIMARY KEY,
-    consumer_id INTEGER,
-    meter_type TEXT
-)
-""")
-
-cur.execute("""
-CREATE TABLE IF NOT EXISTS CONSUMPTION(
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    meter_id INTEGER,
-    units REAL,
-    reading_date TEXT
-)
-""")
-
-cur.execute("""
-CREATE TABLE IF NOT EXISTS ALERT(
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    meter_id INTEGER,
-    units REAL,
-    alert_type TEXT,
-    alert_date TEXT
-)
-""")
-conn.commit()
-
 # --------------------------------------------------
-# INITIAL DATA
+# INSERT FUNCTION (CRITICAL)
 # --------------------------------------------------
-if cur.execute("SELECT COUNT(*) FROM CONSUMER").fetchone()[0] == 0:
-    cur.executemany(
-        "INSERT INTO CONSUMER VALUES (?,?,?)",
-        [(1,"Ravi","Chennai"),
-         (2,"Anitha","Madurai"),
-         (3,"Karthik","Coimbatore")]
-    )
-    cur.executemany(
-        "INSERT INTO METER VALUES (?,?,?)",
-        [(101,1,"Smart"),
-         (102,2,"Smart"),
-         (103,3,"Smart")]
-    )
-    conn.commit()
-
-# --------------------------------------------------
-# REAL-TIME SIMULATION
-# --------------------------------------------------
-def simulate():
-    meter = random.choice([101,102,103])
-    units = random.randint(40,330)
-    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+def insert_reading():
+    meter = random.choice([101, 102, 103])
+    units = random.randint(40, 330)
+    ts = datetime.datetime.now()
 
     cur.execute(
-        "INSERT INTO CONSUMPTION(meter_id, units, reading_date) VALUES (?,?,?)",
+        "INSERT INTO CONSUMPTION (meter_id, units, reading_date) VALUES (%s,%s,%s)",
         (meter, units, ts)
     )
 
     if units > THRESHOLD:
         cur.execute(
-            "INSERT INTO ALERT(meter_id, units, alert_type, alert_date) VALUES (?,?,?,?)",
+            "INSERT INTO ALERT (meter_id, units, alert_type, alert_date) VALUES (%s,%s,%s,%s)",
             (meter, units, "POSSIBLE THEFT", ts)
         )
-    conn.commit()
+
+    conn.commit()   # 🔥 REQUIRED
 
 # --------------------------------------------------
 # HEADER
 # --------------------------------------------------
 st.markdown("""
-<h1 style="color:#00E5FF;">⚡ Smart Electricity Theft Detection</h1>
+<h1 style="color:#00E5FF;">⚡ Smart Electricity Theft Detection Dashboard</h1>
 <p style="color:#AAAAAA;">
-Real-time monitoring • Interactive analytics • Dark dashboard
+Real-time SQL storage • Interactive analytics • Dark mode
 </p>
 <hr>
 """, unsafe_allow_html=True)
 
 # --------------------------------------------------
-# CONTROLS
+# BUTTON CONTROLS
 # --------------------------------------------------
 c1, c2 = st.columns(2)
-if c1.button("▶ Simulate 10 Readings"):
-    for _ in range(10):
-        simulate()
-        time.sleep(0.4)
-    st.success("Simulation completed")
 
-if c2.button("➕ Add One Reading"):
-    simulate()
-    st.success("Reading added")
+with c1:
+    if st.button("▶ Simulate 10 Readings"):
+        for _ in range(10):
+            insert_reading()
+            time.sleep(0.2)
+        st.success("10 readings inserted into SQL database")
+        st.rerun()   # 🔥 FORCE REFRESH
+
+with c2:
+    if st.button("➕ Add One Reading"):
+        insert_reading()
+        st.success("1 reading inserted into SQL database")
+        st.rerun()   # 🔥 FORCE REFRESH
 
 # --------------------------------------------------
-# LOAD DATA
+# READ DATA FROM SQL (ALWAYS)
 # --------------------------------------------------
 base_df = pd.read_sql("""
-SELECT c.area, m.meter_id, cs.units, cs.reading_date
+SELECT 
+    c.area,
+    m.meter_id,
+    cs.units,
+    cs.reading_date
 FROM CONSUMER c
 JOIN METER m ON c.consumer_id = m.consumer_id
 JOIN CONSUMPTION cs ON m.meter_id = cs.meter_id
+ORDER BY cs.reading_date DESC
 """, conn)
 
-alert_df = pd.read_sql("SELECT * FROM ALERT", conn)
-
-if base_df.empty:
-    st.warning("No data yet. Start simulation.")
-    st.stop()
+alert_df = pd.read_sql("SELECT * FROM ALERT ORDER BY alert_date DESC", conn)
 
 base_df["reading_date"] = pd.to_datetime(base_df["reading_date"])
 
@@ -181,10 +138,10 @@ if len(date_range) == 2:
 m1, m2, m3 = st.columns(3)
 m1.metric("Total Readings", len(filtered))
 m2.metric("Theft Alerts", len(alert_df))
-m3.metric("Normal Usage", max(len(filtered)-len(alert_df),0))
+m3.metric("Normal Usage", max(len(filtered) - len(alert_df), 0))
 
 # --------------------------------------------------
-# CHARTS
+# ANALYTICS (PLOTLY)
 # --------------------------------------------------
 st.header("📊 Analytics")
 
@@ -206,31 +163,34 @@ if not trend_df.empty:
         use_container_width=True
     )
 
-# Rolling Average
+# Rolling average
 if len(trend_df) >= 3:
     trend_df["rolling_avg"] = trend_df["units"].rolling(3).mean()
     st.plotly_chart(
         px.line(trend_df, x="reading_date",
-                y=["units","rolling_avg"],
+                y=["units", "rolling_avg"],
                 title="Smoothed Consumption Trend"),
         use_container_width=True
     )
 
-# Heatmap (Area x Hour)
+# Heatmap (Area vs Hour)
 heat_df = filtered.copy()
 heat_df["hour"] = heat_df["reading_date"].dt.hour.astype(str)
 
 if heat_df.shape[0] >= 2:
     st.plotly_chart(
         px.density_heatmap(
-            heat_df, x="hour", y="area", z="units",
+            heat_df,
+            x="hour",
+            y="area",
+            z="units",
             color_continuous_scale="YlOrRd",
             title="Consumption Heatmap (Area vs Hour)"
         ),
         use_container_width=True
     )
 
-# Peak Hour
+# Peak hour
 hour_df = heat_df.groupby("hour", as_index=False)["units"].sum()
 if not hour_df.empty:
     st.plotly_chart(
@@ -239,7 +199,7 @@ if not hour_df.empty:
         use_container_width=True
     )
 
-# Theft Trend
+# Theft trend
 if not alert_df.empty:
     alert_df["alert_date"] = pd.to_datetime(alert_df["alert_date"])
     tdf = alert_df.groupby(alert_df["alert_date"].dt.date,
@@ -251,11 +211,11 @@ if not alert_df.empty:
     )
 
 # --------------------------------------------------
-# DATA + EXPORT
+# DATA TABLE + EXPORT
 # --------------------------------------------------
 st.header("📄 Data")
 
-st.dataframe(filtered.tail(20), use_container_width=True)
+st.dataframe(filtered.head(20), use_container_width=True)
 
 csv = filtered.to_csv(index=False).encode("utf-8")
 st.download_button("⬇ Download Filtered Data (CSV)",
@@ -263,6 +223,6 @@ st.download_button("⬇ Download Filtered Data (CSV)",
 
 if not alert_df.empty:
     alert_df.to_excel("alerts.xlsx", index=False)
-    with open("alerts.xlsx","rb") as f:
+    with open("alerts.xlsx", "rb") as f:
         st.download_button("⬇ Download Alerts (Excel)",
                            f, "alerts.xlsx")
