@@ -13,20 +13,27 @@ st.set_page_config(
     layout="wide"
 )
 
-# --------------------------------------------------
-# DATABASE CONNECTION
-# --------------------------------------------------
-def get_connection():
-    return mysql.connector.connect(
-        host=st.secrets["mysql"]["host"],
-        user=st.secrets["mysql"]["user"],
-        password=st.secrets["mysql"]["password"],
-        database=st.secrets["mysql"]["database"],
-        port=st.secrets["mysql"]["port"]
-    )
+st.title("⚡ Smart Electricity Theft Detection Dashboard")
 
 # --------------------------------------------------
-# LOAD DATA
+# DATABASE CONNECTION (SAFE)
+# --------------------------------------------------
+def get_connection():
+    try:
+        return mysql.connector.connect(
+            host=st.secrets["mysql"]["host"],
+            user=st.secrets["mysql"]["user"],
+            password=st.secrets["mysql"]["password"],
+            database=st.secrets["mysql"]["database"],
+            port=st.secrets["mysql"]["port"],
+            connection_timeout=5
+        )
+    except Exception as e:
+        st.error("❌ Database connection failed")
+        st.stop()
+
+# --------------------------------------------------
+# LOAD DATA (SAFE)
 # --------------------------------------------------
 @st.cache_data(show_spinner=False)
 def load_data():
@@ -42,16 +49,15 @@ def load_data():
     FROM CONSUMER c
     JOIN METER m ON c.consumer_id = m.consumer_id
     LEFT JOIN CONSUMPTION cs ON m.meter_id = cs.meter_id
-    ORDER BY cs.reading_date DESC
     """
     df = pd.read_sql(query, conn)
     conn.close()
     return df
 
 # --------------------------------------------------
-# INSERT SIMULATED READINGS
+# INSERT SIMULATED READINGS (SAFE)
 # --------------------------------------------------
-def insert_readings(count=1):
+def insert_readings(n):
     conn = get_connection()
     cur = conn.cursor()
 
@@ -59,13 +65,13 @@ def insert_readings(count=1):
     meters = cur.fetchall()
 
     if not meters:
-        st.warning("⚠️ No meters found. Please add meter records first.")
+        st.warning("⚠️ No meters found. Please insert meter data first.")
         conn.close()
         return
 
-    for _ in range(count):
+    for _ in range(n):
         meter_id = random.choice(meters)[0]
-        units = round(random.uniform(1, 25), 2)
+        units = round(random.uniform(2, 30), 2)
 
         cur.execute(
             """
@@ -78,31 +84,33 @@ def insert_readings(count=1):
     conn.commit()
     conn.close()
     st.cache_data.clear()
-    st.success(f"✅ {count} reading(s) simulated successfully")
+    st.success(f"✅ {n} reading(s) simulated")
 
 # --------------------------------------------------
-# UI
+# REAL-TIME SIMULATION UI
 # --------------------------------------------------
-st.title("⚡ Smart Electricity Theft Detection Dashboard")
-
 st.subheader("🔁 Real-Time Reading Simulation")
 
 c1, c2 = st.columns(2)
 with c1:
     if st.button("➕ Simulate 1 Reading"):
         insert_readings(1)
+
 with c2:
     if st.button("➕➕ Simulate 10 Readings"):
         insert_readings(10)
 
+# --------------------------------------------------
+# LOAD DATA
+# --------------------------------------------------
 df = load_data()
 
 if df.empty or df["reading_date"].isna().all():
-    st.info("No consumption data available yet.")
+    st.info("ℹ️ No consumption data available yet.")
     st.stop()
 
 # --------------------------------------------------
-# PREPROCESSING
+# PREPROCESS
 # --------------------------------------------------
 df = df.dropna(subset=["reading_date"])
 df["reading_date"] = pd.to_datetime(df["reading_date"])
@@ -117,14 +125,14 @@ m2.metric("Total Units", round(df["units_consumed"].sum(), 2))
 m3.metric("Avg Units / Reading", round(df["units_consumed"].mean(), 2))
 
 # ==================================================
-# 📈 1. SMOOTHED CONSUMPTION TREND
+# 📈 SMOOTHED CONSUMPTION TREND
 # ==================================================
 st.subheader("📈 Smoothed Consumption Trend")
 
 trend = (
     df.sort_values("reading_date")
       .set_index("reading_date")
-      .rolling("3H")["units_consumed"]
+      .rolling("2H")["units_consumed"]
       .mean()
       .reset_index()
 )
@@ -133,51 +141,50 @@ fig_trend = px.line(
     trend,
     x="reading_date",
     y="units_consumed",
-    title="Smoothed Electricity Consumption (Rolling Average)"
+    title="Smoothed Electricity Consumption (Rolling Avg)"
 )
 
 st.plotly_chart(fig_trend, use_container_width=True)
 
 # ==================================================
-# 🔥 2. CONSUMPTION HEATMAP (AREA × HOUR)
+# 🔥 CONSUMPTION HEATMAP (AREA × HOUR)
 # ==================================================
 st.subheader("🔥 Consumption Heatmap (Area vs Hour)")
 
-heatmap_data = (
+heatmap_df = (
     df.groupby(["area", "hour"])["units_consumed"]
       .sum()
       .reset_index()
 )
 
 fig_heatmap = px.density_heatmap(
-    heatmap_data,
+    heatmap_df,
     x="hour",
     y="area",
     z="units_consumed",
     color_continuous_scale="YlOrRd",
-    title="Electricity Usage Heatmap (Area vs Hour)"
+    title="Electricity Usage Heatmap"
 )
 
 st.plotly_chart(fig_heatmap, use_container_width=True)
 
 # ==================================================
-# ⏰ 3. PEAK HOUR USAGE
+# ⏰ PEAK HOUR USAGE
 # ==================================================
 st.subheader("⏰ Peak Hour Usage")
 
-peak = (
+peak_df = (
     df.groupby("hour")["units_consumed"]
       .sum()
       .reset_index()
 )
 
 fig_peak = px.bar(
-    peak,
+    peak_df,
     x="hour",
     y="units_consumed",
     color="units_consumed",
-    title="Peak Hour Electricity Usage",
-    labels={"hour": "Hour of Day"}
+    title="Peak Hour Electricity Usage"
 )
 
 st.plotly_chart(fig_peak, use_container_width=True)
@@ -186,4 +193,5 @@ st.plotly_chart(fig_peak, use_container_width=True)
 # 📄 LATEST RECORDS
 # ==================================================
 st.subheader("📄 Latest Records")
-st.dataframe(df.head(20), use_container_width=True)
+st.dataframe(df.sort_values("reading_date", ascending=False).head(20),
+             use_container_width=True)
