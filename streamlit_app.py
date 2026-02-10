@@ -2,227 +2,188 @@ import streamlit as st
 import mysql.connector
 import pandas as pd
 import random
-import datetime
-import time
+from datetime import datetime
 import plotly.express as px
-import plotly.io as pio
 
 # --------------------------------------------------
-# CONFIG
+# PAGE CONFIG
 # --------------------------------------------------
-st.set_page_config(page_title="Smart Electricity Theft Detection", layout="wide")
-pio.templates.default = "plotly_dark"
-THRESHOLD = 250
-
-# --------------------------------------------------
-# DATABASE CONNECTION (MySQL)
-# --------------------------------------------------
-conn = mysql.connector.connect(
-    host=st.secrets["mysql"]["host"],
-    port=st.secrets["mysql"]["port"],
-    user=st.secrets["mysql"]["user"],
-    password=st.secrets["mysql"]["password"],
-    database=st.secrets["mysql"]["database"]
+st.set_page_config(
+    page_title="Smart Electricity Theft Detection",
+    layout="wide"
 )
-cur = conn.cursor()
 
 # --------------------------------------------------
-# INSERT FUNCTION (CRITICAL)
+# DATABASE CONNECTION
 # --------------------------------------------------
-def insert_reading():
-    meter = random.choice([101, 102, 103])
-    units = random.randint(40, 330)
-    ts = datetime.datetime.now()
-
-    cur.execute(
-        "INSERT INTO CONSUMPTION (meter_id, units, reading_date) VALUES (%s,%s,%s)",
-        (meter, units, ts)
+def get_connection():
+    return mysql.connector.connect(
+        host=st.secrets["mysql"]["host"],
+        user=st.secrets["mysql"]["user"],
+        password=st.secrets["mysql"]["password"],
+        database=st.secrets["mysql"]["database"],
+        port=st.secrets["mysql"]["port"]
     )
 
-    if units > THRESHOLD:
+# --------------------------------------------------
+# LOAD DATA
+# --------------------------------------------------
+@st.cache_data(show_spinner=False)
+def load_data():
+    conn = get_connection()
+    query = """
+    SELECT
+        c.consumer_id,
+        c.name,
+        c.area,
+        m.meter_id,
+        cs.reading_date,
+        cs.units AS units_consumed
+    FROM CONSUMER c
+    JOIN METER m ON c.consumer_id = m.consumer_id
+    LEFT JOIN CONSUMPTION cs ON m.meter_id = cs.meter_id
+    ORDER BY cs.reading_date DESC
+    """
+    df = pd.read_sql(query, conn)
+    conn.close()
+    return df
+
+# --------------------------------------------------
+# INSERT SIMULATED READINGS
+# --------------------------------------------------
+def insert_readings(count=1):
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("SELECT meter_id FROM METER")
+    meters = cur.fetchall()
+
+    if not meters:
+        st.warning("⚠️ No meters found. Please add meter records first.")
+        conn.close()
+        return
+
+    for _ in range(count):
+        meter_id = random.choice(meters)[0]
+        units = round(random.uniform(1, 25), 2)
+
         cur.execute(
-            "INSERT INTO ALERT (meter_id, units, alert_type, alert_date) VALUES (%s,%s,%s,%s)",
-            (meter, units, "POSSIBLE THEFT", ts)
+            """
+            INSERT INTO CONSUMPTION (meter_id, reading_date, units)
+            VALUES (%s, %s, %s)
+            """,
+            (meter_id, datetime.now(), units)
         )
 
-    conn.commit()   # 🔥 REQUIRED
+    conn.commit()
+    conn.close()
+    st.cache_data.clear()
+    st.success(f"✅ {count} reading(s) simulated successfully")
 
 # --------------------------------------------------
-# HEADER
+# UI
 # --------------------------------------------------
-st.markdown("""
-<h1 style="color:#00E5FF;">⚡ Smart Electricity Theft Detection Dashboard</h1>
-<p style="color:#AAAAAA;">
-Real-time SQL storage • Interactive analytics • Dark mode
-</p>
-<hr>
-""", unsafe_allow_html=True)
+st.title("⚡ Smart Electricity Theft Detection Dashboard")
 
-# --------------------------------------------------
-# BUTTON CONTROLS
-# --------------------------------------------------
+st.subheader("🔁 Real-Time Reading Simulation")
+
 c1, c2 = st.columns(2)
-
 with c1:
-    if st.button("▶ Simulate 10 Readings"):
-        for _ in range(10):
-            insert_reading()
-            time.sleep(0.2)
-        st.success("10 readings inserted into SQL database")
-        st.rerun()   # 🔥 FORCE REFRESH
-
+    if st.button("➕ Simulate 1 Reading"):
+        insert_readings(1)
 with c2:
-    if st.button("➕ Add One Reading"):
-        insert_reading()
-        st.success("1 reading inserted into SQL database")
-        st.rerun()   # 🔥 FORCE REFRESH
+    if st.button("➕➕ Simulate 10 Readings"):
+        insert_readings(10)
+
+df = load_data()
+
+if df.empty or df["reading_date"].isna().all():
+    st.info("No consumption data available yet.")
+    st.stop()
 
 # --------------------------------------------------
-# READ DATA FROM SQL (ALWAYS)
+# PREPROCESSING
 # --------------------------------------------------
-base_df = pd.read_sql("""
-SELECT 
-    c.area,
-    m.meter_id,
-    cs.units,
-    cs.reading_date
-FROM CONSUMER c
-JOIN METER m ON c.consumer_id = m.consumer_id
-JOIN CONSUMPTION cs ON m.meter_id = cs.meter_id
-ORDER BY cs.reading_date DESC
-""", conn)
-
-alert_df = pd.read_sql("SELECT * FROM ALERT ORDER BY alert_date DESC", conn)
-
-base_df["reading_date"] = pd.to_datetime(base_df["reading_date"])
-
-# --------------------------------------------------
-# SIDEBAR FILTERS
-# --------------------------------------------------
-st.sidebar.header("🔍 Filters")
-
-areas = ["All"] + sorted(base_df["area"].unique().tolist())
-meters = ["All"] + sorted(base_df["meter_id"].astype(str).unique().tolist())
-
-sel_area = st.sidebar.selectbox("Area", areas)
-sel_meter = st.sidebar.selectbox("Meter ID", meters)
-
-min_d = base_df["reading_date"].min().date()
-max_d = base_df["reading_date"].max().date()
-
-date_range = st.sidebar.date_input(
-    "Date Range",
-    value=(min_d, max_d),
-    min_value=min_d,
-    max_value=max_d
-)
-
-filtered = base_df.copy()
-
-if sel_area != "All":
-    filtered = filtered[filtered["area"] == sel_area]
-
-if sel_meter != "All":
-    filtered = filtered[filtered["meter_id"].astype(str) == sel_meter]
-
-if len(date_range) == 2:
-    s, e = date_range
-    filtered = filtered[
-        (filtered["reading_date"].dt.date >= s) &
-        (filtered["reading_date"].dt.date <= e)
-    ]
+df = df.dropna(subset=["reading_date"])
+df["reading_date"] = pd.to_datetime(df["reading_date"])
+df["hour"] = df["reading_date"].dt.hour
 
 # --------------------------------------------------
 # METRICS
 # --------------------------------------------------
 m1, m2, m3 = st.columns(3)
-m1.metric("Total Readings", len(filtered))
-m2.metric("Theft Alerts", len(alert_df))
-m3.metric("Normal Usage", max(len(filtered) - len(alert_df), 0))
+m1.metric("Total Readings", len(df))
+m2.metric("Total Units", round(df["units_consumed"].sum(), 2))
+m3.metric("Avg Units / Reading", round(df["units_consumed"].mean(), 2))
 
-# --------------------------------------------------
-# ANALYTICS (PLOTLY)
-# --------------------------------------------------
-st.header("📊 Analytics")
+# ==================================================
+# 📈 1. SMOOTHED CONSUMPTION TREND
+# ==================================================
+st.subheader("📈 Smoothed Consumption Trend")
 
-# Area-wise
-area_df = filtered.groupby("area", as_index=False)["units"].sum()
-if not area_df.empty:
-    st.plotly_chart(
-        px.bar(area_df, x="area", y="units", color="area",
-               title="Area-wise Electricity Consumption"),
-        use_container_width=True
-    )
+trend = (
+    df.sort_values("reading_date")
+      .set_index("reading_date")
+      .rolling("3H")["units_consumed"]
+      .mean()
+      .reset_index()
+)
 
-# Trend
-trend_df = filtered.groupby("reading_date", as_index=False)["units"].sum()
-if not trend_df.empty:
-    st.plotly_chart(
-        px.line(trend_df, x="reading_date", y="units",
-                markers=True, title="Consumption Trend"),
-        use_container_width=True
-    )
+fig_trend = px.line(
+    trend,
+    x="reading_date",
+    y="units_consumed",
+    title="Smoothed Electricity Consumption (Rolling Average)"
+)
 
-# Rolling average
-if len(trend_df) >= 3:
-    trend_df["rolling_avg"] = trend_df["units"].rolling(3).mean()
-    st.plotly_chart(
-        px.line(trend_df, x="reading_date",
-                y=["units", "rolling_avg"],
-                title="Smoothed Consumption Trend"),
-        use_container_width=True
-    )
+st.plotly_chart(fig_trend, use_container_width=True)
 
-# Heatmap (Area vs Hour)
-heat_df = filtered.copy()
-heat_df["hour"] = heat_df["reading_date"].dt.hour.astype(str)
+# ==================================================
+# 🔥 2. CONSUMPTION HEATMAP (AREA × HOUR)
+# ==================================================
+st.subheader("🔥 Consumption Heatmap (Area vs Hour)")
 
-if heat_df.shape[0] >= 2:
-    st.plotly_chart(
-        px.density_heatmap(
-            heat_df,
-            x="hour",
-            y="area",
-            z="units",
-            color_continuous_scale="YlOrRd",
-            title="Consumption Heatmap (Area vs Hour)"
-        ),
-        use_container_width=True
-    )
+heatmap_data = (
+    df.groupby(["area", "hour"])["units_consumed"]
+      .sum()
+      .reset_index()
+)
 
-# Peak hour
-hour_df = heat_df.groupby("hour", as_index=False)["units"].sum()
-if not hour_df.empty:
-    st.plotly_chart(
-        px.bar(hour_df, x="hour", y="units",
-               title="Peak Hour Usage"),
-        use_container_width=True
-    )
+fig_heatmap = px.density_heatmap(
+    heatmap_data,
+    x="hour",
+    y="area",
+    z="units_consumed",
+    color_continuous_scale="YlOrRd",
+    title="Electricity Usage Heatmap (Area vs Hour)"
+)
 
-# Theft trend
-if not alert_df.empty:
-    alert_df["alert_date"] = pd.to_datetime(alert_df["alert_date"])
-    tdf = alert_df.groupby(alert_df["alert_date"].dt.date,
-                           as_index=False).size()
-    st.plotly_chart(
-        px.line(tdf, x="alert_date", y="size",
-                markers=True, title="Theft Alert Trend"),
-        use_container_width=True
-    )
+st.plotly_chart(fig_heatmap, use_container_width=True)
 
-# --------------------------------------------------
-# DATA TABLE + EXPORT
-# --------------------------------------------------
-st.header("📄 Data")
+# ==================================================
+# ⏰ 3. PEAK HOUR USAGE
+# ==================================================
+st.subheader("⏰ Peak Hour Usage")
 
-st.dataframe(filtered.head(20), use_container_width=True)
+peak = (
+    df.groupby("hour")["units_consumed"]
+      .sum()
+      .reset_index()
+)
 
-csv = filtered.to_csv(index=False).encode("utf-8")
-st.download_button("⬇ Download Filtered Data (CSV)",
-                   csv, "filtered_consumption.csv")
+fig_peak = px.bar(
+    peak,
+    x="hour",
+    y="units_consumed",
+    color="units_consumed",
+    title="Peak Hour Electricity Usage",
+    labels={"hour": "Hour of Day"}
+)
 
-if not alert_df.empty:
-    alert_df.to_excel("alerts.xlsx", index=False)
-    with open("alerts.xlsx", "rb") as f:
-        st.download_button("⬇ Download Alerts (Excel)",
-                           f, "alerts.xlsx")
+st.plotly_chart(fig_peak, use_container_width=True)
+
+# ==================================================
+# 📄 LATEST RECORDS
+# ==================================================
+st.subheader("📄 Latest Records")
+st.dataframe(df.head(20), use_container_width=True)
